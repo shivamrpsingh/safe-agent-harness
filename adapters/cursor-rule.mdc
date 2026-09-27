@@ -1,0 +1,11 @@
+---
+description: Safe agent harness. Apply when building, changing, testing, or reviewing LLM agents, tool calling, function calling, MCP tools, agent loops, sandboxing, prompt injection defenses, cost or rate limits, human approval, PII redaction, or agent evals.
+globs: ["**/agent*/**", "**/agents/**", "**/tools/**", "**/*agent*.py", "**/*tool*.py"]
+alwaysApply: false
+---
+Follow `skills/safe-agent-harness/SKILL.md`:
+1. Classify the task with its routing table.
+2. Read only the matching sections of `skills/safe-agent-harness/references/pointers.md`.
+3. Build with the `safe_agent_harness` library (`pip install safe-agent-harness`).
+4. Obey the hard rules. Safety goes in code, not prompts.
+5. End with the exit checklist.
