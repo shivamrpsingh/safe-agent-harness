@@ -52,7 +52,7 @@ def test_schema_rejects_bad_args():
 
 
 def test_irreversible_denied_by_default():
-    h, sink = make([("refund", {"order_id": "A1", "amount": 5}), "ok"])
+    h, sink = make([("refund", {"order_id": "A1", "amount": 5, "idempotency_key": "k1"}), "ok"])
     h.run("u", "s", "refund")
     assert sink.of("approval_denied") and not sink.of("tool_call")
 
@@ -120,7 +120,8 @@ def test_guards_helpers():
 
 def test_run_evals_gate():
     cases = [EvalCase("deny", "refund", lambda ans, s: bool(s.of("approval_denied")),
-                      ["adversarial"], [("refund", {"order_id": "A", "amount": 1}), "ok"])]
+                      ["adversarial"],
+                      [("refund", {"order_id": "A", "amount": 1, "idempotency_key": "k1"}), "ok"])]
     def mk(case, tracer):
         h, _ = make(case.model_script)
         h.tracer = tracer

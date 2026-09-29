@@ -25,21 +25,25 @@ from safe_agent_harness import (
     Harness, Tool, ToolRegistry, tool, Risk,            # P1 P3 P4
     policy_approver, cli_approver, deny_all,            # P4
     run_in_sandbox,                                     # P6
-    Budget, RateLimiter, KILL_SWITCH_ENV,               # P7
+    Budget, CostBudget, RateLimiter, KILL_SWITCH_ENV,               # P7
     OutputValidator, redact, scan_injection,            # P5 P8
     Tracer, MemorySink, FailureLog,                     # P9
     EvalCase, run_evals, FakeModel,                     # P10
-    AnthropicClient,                                    # model adapter
+    AnthropicClient, OllamaClient,                      # model adapters
+    RunResult,                                          # structured run
 )
 
 @tool("refund", "Refund an order", RefundArgs, risk=Risk.IRREVERSIBLE)
-def refund(a: RefundArgs): ...
+def refund(a: RefundArgs): ...  # RefundArgs includes idempotency_key
 
 agent = Harness([AnthropicClient("claude-sonnet-5")], ToolRegistry([refund]),
                 approver=policy_approver({"refund": lambda a: a["amount"] <= 50}),
                 output_validator=OutputValidator(),
-                budget=lambda: Budget(max_steps=6))
-agent.run(user_id, session_id, task)
+                budget=lambda: CostBudget(max_steps=6, max_dollars=1))
+agent.run(user_id, session_id, task)                 # str, unchanged
+agent.run(user_id, session_id, task, structured=True)  # RunResult
+agent.run(user_id, session_id, task, checkpoint="run.json")
+agent.resume("run.json")
 ```
 
 ## Routing table: task → pointers → API
@@ -51,12 +55,12 @@ agent.run(user_id, session_id, task)
 | Tool sends, deletes, pays, writes externally | 4 | P4 | `Risk.IRREVERSIBLE`, `policy_approver` |
 | Agent reads web, files, email, RAG | 5 | P5 | `untrusted_output=True` |
 | Agent runs code or shell | 6 | P6 | `run_in_sandbox(use_docker=True)` |
-| Cost, loops, abuse | 7 | P7 | `Budget`, `RateLimiter`, `AGENT_KILL_SWITCH=1` |
+| Cost, loops, abuse | 7 | P7 | `CostBudget`, `RateLimiter`, `AGENT_KILL_SWITCH=1` |
 | Output goes to DB, API, customer | 8 | P8 | `OutputValidator(schema=..., block_on=...)` |
 | "What did the agent do?" | 9 | P9 | `Tracer(sink=...)`, `FailureLog(path=...)` |
 | Model or prompt change, release | 10 | P10 | `EvalCase`, `run_evals(threshold=...)` |
 | Flaky tools or model outage | 1 | P1 | `TransientError`, `fallback=`, model list |
-| Different LLM provider | 1 | P1 | implement `ModelClient.step()` |
+| Different LLM provider | 1 | P1 | `OllamaClient` or implement `ModelClient.step()` |
 | PR review of agent code | all | P-all | whole API |
 
 ## Build order for a new agent
@@ -64,7 +68,7 @@ agent.run(user_id, session_id, task)
 1. Scope (P2): purpose and never-do list in `system=`.
 2. Tools (P3, P4): `@tool` with a strict Pydantic model and a `risk=` on each.
 3. Approvals (P4): `policy_approver` with a human `escalate=` for anything above policy.
-4. Limits (P7): `Budget` and `RateLimiter`; confirm the kill switch works.
+4. Limits (P7): `CostBudget` (steps, tokens, seconds, dollars, GPU-minutes) and `RateLimiter`; confirm the kill switch works. Long runs pass `checkpoint=` and continue with `resume`.
 5. Sandbox (P6): any code execution through `run_in_sandbox(use_docker=True)`.
 6. Untrusted input (P5): `untrusted_output=True` on web, file, email, and RAG tools.
 7. Output (P8): `OutputValidator`, with `schema=` for structured output.

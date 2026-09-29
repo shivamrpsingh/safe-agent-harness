@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -15,7 +16,8 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Protocol
+from pathlib import Path
+from typing import Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ValidationError
 
@@ -86,22 +88,71 @@ class BudgetExceeded(Exception):
 
 @dataclass
 class Budget:
+    """Step, token, time, dollar, and GPU-minute cap. Also exported as CostBudget."""
+
     max_steps: int = 8
     max_tokens: int = 50_000
     max_seconds: float = 60.0
+    max_dollars: float = math.inf
+    max_gpu_minutes: float = math.inf
     steps: int = 0
     tokens: int = 0
+    dollars: float = 0.0
+    gpu_minutes: float = 0.0
     started: float = field(default_factory=time.time)
 
-    def charge(self, tokens: int = 0) -> None:
-        self.steps += 1
+    def charge(
+        self,
+        tokens: int = 0,
+        *,
+        dollars: float = 0.0,
+        gpu_minutes: float = 0.0,
+        count_step: bool = True,
+    ) -> None:
+        if count_step:
+            self.steps += 1
         self.tokens += tokens
+        self.dollars += dollars
+        self.gpu_minutes += gpu_minutes
         if self.steps > self.max_steps:
             raise BudgetExceeded(f"step limit {self.max_steps} reached")
         if self.tokens > self.max_tokens:
             raise BudgetExceeded(f"token limit {self.max_tokens} reached")
         if time.time() - self.started > self.max_seconds:
             raise BudgetExceeded(f"time limit {self.max_seconds}s reached")
+        if self.dollars > self.max_dollars:
+            raise BudgetExceeded(f"dollar limit {self.max_dollars} reached")
+        if self.gpu_minutes > self.max_gpu_minutes:
+            raise BudgetExceeded(f"gpu-minute limit {self.max_gpu_minutes} reached")
+
+    def snapshot(self) -> dict:
+        data = {
+            "max_steps": self.max_steps,
+            "max_tokens": self.max_tokens,
+            "max_seconds": self.max_seconds,
+            "max_dollars": self.max_dollars,
+            "max_gpu_minutes": self.max_gpu_minutes,
+            "steps": self.steps,
+            "tokens": self.tokens,
+            "dollars": self.dollars,
+            "gpu_minutes": self.gpu_minutes,
+            "started": self.started,
+        }
+        for key in ("max_dollars", "max_gpu_minutes"):
+            if data[key] == math.inf:
+                data[key] = None
+        return data
+
+    @classmethod
+    def restore(cls, data: dict) -> Budget:
+        values = dict(data)
+        for key in ("max_dollars", "max_gpu_minutes"):
+            if values.get(key) is None:
+                values[key] = math.inf
+        return cls(**values)
+
+
+CostBudget = Budget
 
 
 class RateLimiter:
@@ -137,6 +188,8 @@ class Tool:
     risk: Risk = Risk.READ
     fallback: str | None = None
     untrusted_output: bool = False  # P5: True for web, files, email, RAG
+    dollars: float = 0.0
+    gpu_minutes: float = 0.0
 
     def spec(self) -> dict:
         return {"name": self.name, "description": self.description,
@@ -166,10 +219,12 @@ class ToolRegistry:
 
 def tool(name: str, description: str, args_model: type[BaseModel], *,
          risk: Risk = Risk.READ, fallback: str | None = None,
-         untrusted_output: bool = False) -> Callable[[Callable], Tool]:
+         untrusted_output: bool = False, dollars: float = 0.0,
+         gpu_minutes: float = 0.0) -> Callable[[Callable], Tool]:
     """Decorator: @tool("lookup", "Look up an order", LookupArgs) def f(args): ..."""
     def wrap(fn: Callable) -> Tool:
-        return Tool(name, description, args_model, fn, risk, fallback, untrusted_output)
+        return Tool(name, description, args_model, fn, risk, fallback, untrusted_output,
+                    dollars, gpu_minutes)
     return wrap
 
 
@@ -194,6 +249,15 @@ class ModelClient(Protocol):
 
     def step(self, system: str, messages: list[dict], tools: list[dict]) -> dict:
         """Return {"text": str, "tool_calls": [{"id","name","input"}], "tokens": int, "raw": Any}"""
+
+
+class RunResult(BaseModel):
+    answer: str
+    trace_id: str
+    steps: int
+    cost: float
+    gpu_minutes: float
+    status: Literal["ok", "degraded"]
 
 
 # ---------------------------------------------------------------- harness
@@ -222,6 +286,7 @@ class Harness:
         self.tracer = tracer or Tracer()
         self.failures = failures or FailureLog()
         self.retry_base = retry_base
+        self._seen: dict[str, set[str]] = defaultdict(set)
 
     # P1 / P4 of the reel: graceful degradation
     def degrade(self, trace_id: str, reason: str, done: list[str]) -> str:
@@ -245,7 +310,8 @@ class Harness:
                 self.tracer.event(trace_id, "model_failed", model=model.name, error=str(e))
         raise RuntimeError(f"all models failed: {last}")
 
-    def _run_tool(self, trace_id: str, name: str, raw_args: dict, _depth: int = 0) -> str:
+    def _run_tool(self, trace_id: str, session_id: str, name: str, raw_args: dict,
+                  budget: Budget, _depth: int = 0) -> str:
         t = self.tools.get(name)
         if t is None:
             return f"ERROR: unknown tool '{name}'"
@@ -255,7 +321,15 @@ class Harness:
             self.tracer.event(trace_id, "args_rejected", tool=name)
             return f"ERROR: invalid arguments: {e.errors(include_url=False)}"
 
+        key = ""
         if t.risk is Risk.IRREVERSIBLE:
+            key = str(raw_args.get("idempotency_key") or "")
+            if not key:
+                self.tracer.event(trace_id, "idempotency_rejected", tool=name, reason="missing")
+                return "ERROR: irreversible tool requires idempotency_key"
+            if key in self._seen[session_id]:
+                self.tracer.event(trace_id, "idempotency_rejected", tool=name, reason="duplicate")
+                return "ERROR: duplicate idempotency_key"
             try:
                 ok = bool(self.approver(name, raw_args))
             except Exception as e:  # noqa: BLE001 - approver failure = deny
@@ -273,9 +347,13 @@ class Harness:
             self.failures.record(trace_id, f"tool:{name}", str(e), raw_args)
             if t.fallback and _depth < 2:
                 self.tracer.event(trace_id, "tool_fallback", frm=name, to=t.fallback)
-                return self._run_tool(trace_id, t.fallback, raw_args, _depth + 1)
+                return self._run_tool(trace_id, session_id, t.fallback, raw_args, budget, _depth + 1)
             return f"ERROR: tool '{name}' failed: {e}"
 
+        if t.risk is Risk.IRREVERSIBLE:
+            self._seen[session_id].add(key)
+        if t.dollars or t.gpu_minutes:
+            budget.charge(0, dollars=t.dollars, gpu_minutes=t.gpu_minutes, count_step=False)
         if t.untrusted_output:  # P5
             hits = scan_injection(result)
             if hits:
@@ -284,22 +362,63 @@ class Harness:
         self.tracer.event(trace_id, "tool_result", tool=name, result=result[:300])
         return result
 
-    def run(self, user_id: str, session_id: str, task: str) -> str:
-        trace_id = uuid.uuid4().hex[:12]
-        self.tracer.event(trace_id, "run_start", user=user_id, task=task[:200])
+    def _result(self, answer: str, trace_id: str, budget: Budget, status: Literal["ok", "degraded"]) -> RunResult:
+        return RunResult(answer=answer, trace_id=trace_id, steps=budget.steps, cost=budget.dollars,
+                         gpu_minutes=budget.gpu_minutes, status=status)
 
-        if os.getenv(KILL_SWITCH_ENV) == "1":
-            return self.degrade(trace_id, "agent temporarily disabled", [])
-        if not self.rate.allow(user_id):
-            return self.degrade(trace_id, "rate limit reached, try again shortly", [])
+    def _save(self, path: Path | None, state: dict) -> None:
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob = json.dumps(state)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(blob, encoding="utf-8")
+        tmp.replace(path)
 
-        budget, done = self.new_budget(), []
-        messages = self.memory.history(session_id) + [{"role": "user", "content": task}]
+    def _state(self, trace_id: str, user_id: str, session_id: str, task: str,
+               messages: list, budget: Budget, done: list[str], status: str, answer: str = "") -> dict:
+        return {
+            "trace_id": trace_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "task": task,
+            "messages": messages,
+            "budget": budget.snapshot(),
+            "done": done,
+            "seen": {sid: sorted(keys) for sid, keys in self._seen.items()},
+            "status": status,
+            "answer": answer,
+        }
+
+    def _execute(self, user_id: str, session_id: str, task: str,
+                 checkpoint: Path | None, resumed: dict | None) -> RunResult:
+        if resumed:
+            trace_id = resumed["trace_id"]
+            budget = Budget.restore(resumed["budget"])
+            done = list(resumed.get("done") or [])
+            messages = list(resumed["messages"])
+            for sid, keys in (resumed.get("seen") or {}).items():
+                self._seen[sid].update(keys)
+            if os.getenv(KILL_SWITCH_ENV) == "1":
+                answer = self.degrade(trace_id, "agent temporarily disabled", done)
+                return self._result(answer, trace_id, budget, "degraded")
+        else:
+            trace_id = uuid.uuid4().hex[:12]
+            self.tracer.event(trace_id, "run_start", user=user_id, task=task[:200])
+            budget, done = self.new_budget(), []
+            messages = self.memory.history(session_id) + [{"role": "user", "content": task}]
+            if os.getenv(KILL_SWITCH_ENV) == "1":
+                answer = self.degrade(trace_id, "agent temporarily disabled", done)
+                return self._result(answer, trace_id, budget, "degraded")
+            if not self.rate.allow(user_id):
+                answer = self.degrade(trace_id, "rate limit reached, try again shortly", done)
+                return self._result(answer, trace_id, budget, "degraded")
 
         try:
             while True:
                 out = self._model_step(trace_id, messages)
-                budget.charge(out.get("tokens", 0))
+                budget.charge(out.get("tokens", 0), dollars=float(out.get("dollars") or 0),
+                              gpu_minutes=float(out.get("gpu_minutes") or 0))
 
                 if not out["tool_calls"]:
                     text = out["text"]
@@ -307,23 +426,50 @@ class Harness:
                         text = self.output_validator(text)
                     self.memory.add(session_id, {"role": "user", "content": task})
                     self.memory.add(session_id, {"role": "assistant", "content": text})
-                    self.tracer.event(trace_id, "run_end", steps=budget.steps, tokens=budget.tokens)
-                    return text
+                    self.tracer.event(trace_id, "run_end", steps=budget.steps, tokens=budget.tokens,
+                                      dollars=budget.dollars, gpu_minutes=budget.gpu_minutes)
+                    result = self._result(text, trace_id, budget, "ok")
+                    self._save(checkpoint, self._state(trace_id, user_id, session_id, task,
+                                                       messages, budget, done, "ok", text))
+                    return result
 
                 messages.append({"role": "assistant", "content": out.get("raw") or out["text"]})
                 results = []
                 for call in out["tool_calls"]:
-                    res = self._run_tool(trace_id, call["name"], call["input"])
+                    res = self._run_tool(trace_id, session_id, call["name"], call["input"], budget)
                     done.append(f"{call['name']} -> {res[:60]}")
                     results.append({"type": "tool_result", "tool_use_id": call["id"], "content": res})
                 messages.append({"role": "user", "content": results})
+                self._save(checkpoint, self._state(trace_id, user_id, session_id, task,
+                                                   messages, budget, done, "running"))
 
         except BudgetExceeded as e:
             self.failures.record(trace_id, "budget", str(e), {"task": task})
-            return self.degrade(trace_id, str(e), done)
+            return self._result(self.degrade(trace_id, str(e), done), trace_id, budget, "degraded")
         except OutputRejected as e:
             self.failures.record(trace_id, "output", str(e), {"task": task})
-            return self.degrade(trace_id, "the response failed a safety check", done)
+            return self._result(self.degrade(trace_id, "the response failed a safety check", done),
+                                trace_id, budget, "degraded")
         except Exception as e:  # noqa: BLE001
             self.failures.record(trace_id, "run", str(e), {"task": task})
-            return self.degrade(trace_id, "an internal error occurred", done)
+            return self._result(self.degrade(trace_id, "an internal error occurred", done),
+                                trace_id, budget, "degraded")
+
+    def run(self, user_id: str, session_id: str, task: str,
+            checkpoint: str | Path | None = None, *, structured: bool = False) -> str | RunResult:
+        result = self._execute(user_id, session_id, task,
+                               Path(checkpoint) if checkpoint else None, None)
+        return result if structured else result.answer
+
+    def resume(self, path: str | Path, *, structured: bool = False) -> str | RunResult:
+        file = Path(path)
+        if not file.is_file():
+            raise FileNotFoundError(path)
+        state = json.loads(file.read_text(encoding="utf-8"))
+        if state.get("status") == "ok":
+            result = RunResult(answer=state.get("answer", ""), trace_id=state["trace_id"],
+                               steps=state["budget"]["steps"], cost=state["budget"]["dollars"],
+                               gpu_minutes=state["budget"]["gpu_minutes"], status="ok")
+            return result if structured else result.answer
+        result = self._execute(state["user_id"], state["session_id"], state["task"], file, state)
+        return result if structured else result.answer

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "safe-agent-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "A safe, secure, observable harness for LLM agents: risk-tiered tools, approvals, sandboxing, limits, guards, tracing, and evals."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,7 @@ dependencies = ["pydantic>=2.5"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
+ollama = ["ollama>=0.4"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
 [project.urls]

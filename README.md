@@ -7,7 +7,7 @@ full tracing, and an eval harness.
 
 > Agent = Model + Harness. The model proposes. The harness decides what runs.
 
-- **Library:** `pip install safe-agent-harness`, works with Claude or any model
+- **Library:** `pip install safe-agent-harness`, works with Claude, Ollama (`safe-agent-harness[ollama]`), or any model
 - **Skill:** drop-in `SKILL.md` that teaches Claude Code, Cursor, Codex, Copilot, and other AI dev tools to build agents this way
 - **Setup:** `uvx safe-agent-harness init` wires it into Claude Code, Cursor, or AGENTS.md in one step
 - **Commands:** `/new-agent`, `/add-tool`, `/harden`, `/audit`, `/review-pr`, `/evals`, `/debug-trace`
@@ -33,7 +33,7 @@ code, where a prompt can't talk its way around them.
 | 4 | Risk tiers | `Risk.READ / WRITE / IRREVERSIBLE`, approvers that fail closed |
 | 5 | Input distrust | `untrusted_output=True` wraps content as data and flags injection |
 | 6 | Sandboxing | `run_in_sandbox()` in Docker: no network, read-only, capped |
-| 7 | Hard limits | `Budget`, `RateLimiter`, `AGENT_KILL_SWITCH` |
+| 7 | Hard limits | `CostBudget` (dollars and GPU-minutes), `RateLimiter`, `AGENT_KILL_SWITCH` |
 | 8 | Output validation | `OutputValidator`: schema, PII redaction, secret blocking |
 | 9 | Observability | `Tracer` JSON events, `FailureLog` feedback loop |
 | 10 | Evals | `EvalCase`, `run_evals(threshold=...)` as a CI gate |

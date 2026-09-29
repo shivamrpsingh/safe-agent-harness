@@ -16,7 +16,7 @@ P7 Limits · P8 Output validation · P9 Observability · P10 Evals · P-all Revi
 - At least two models in the list for fallback
 - Tools raise `TransientError` only for retryable failures (timeout, 429, 5xx)
 - Flaky external tools declare a `fallback`
-- New providers implement `ModelClient.step()` returning `text`, `tool_calls`, `tokens`, `raw`
+- New providers implement `ModelClient.step()` returning `text`, `tool_calls`, `tokens`, `raw`, plus `dollars` and `gpu_minutes`. `OllamaClient` is the local adapter (`pip install safe-agent-harness[ollama]`).
 **Mistake:** Safety rules that exist only in the system prompt.
 
 ## P2 — Narrow scope
@@ -48,7 +48,7 @@ Any approver exception is treated as a denial.
 **Checklist:**
 - Every tool tagged
 - Production escalation goes to a real human channel (Slack, UI)
-- Writes carry idempotency keys
+- Writes carry idempotency keys. `Risk.IRREVERSIBLE` requires `idempotency_key` in the raw args. A missing or duplicate key does not call the tool and is traced as `idempotency_rejected`.
 **Decision rule:** "Can it be undone without contacting anyone?" No → `IRREVERSIBLE`.
 **Mistake:** Sending emails or deleting records with no approval step.
 
@@ -77,7 +77,7 @@ Docker flags: no network, read-only root, CPU/memory/PID caps, all capabilities 
 ## P7 — Hard limits
 
 **What:** Steps, tokens, time, and request rate enforced in code.
-**API:** `budget=lambda: Budget(max_steps, max_tokens, max_seconds)`, `rate_limiter=RateLimiter(limit, window)`, env `AGENT_KILL_SWITCH=1`.
+**API:** `budget=lambda: CostBudget(max_steps, max_tokens, max_seconds, max_dollars, max_gpu_minutes)`, `rate_limiter=RateLimiter(limit, window)`, env `AGENT_KILL_SWITCH=1`. `Budget` is the same class. Models and tools report `dollars` and `gpu_minutes`; a breach raises `BudgetExceeded`. `run(..., checkpoint=path)` writes a JSON file after each step. `Harness.resume(path)` continues it. `run(..., structured=True)` returns `RunResult` (`answer`, `trace_id`, `steps`, `cost`, `gpu_minutes`, `status`). The default `run()` return value stays a string.
 **Checklist:**
 - Limits tuned from real traces
 - Redis-backed `RateLimiter` and `SessionMemory` for multi-instance deployments
