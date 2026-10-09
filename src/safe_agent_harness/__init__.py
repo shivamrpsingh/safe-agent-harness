@@ -10,7 +10,7 @@ from .core import (KILL_SWITCH_ENV, Budget, BudgetExceeded, CostBudget, FailureL
 from .evals import EvalCase, EvalReport, run_evals
 from .guards import (OutputRejected, OutputValidator, redact, scan_injection,
                      wrap_tool_output)
-from .models import AnthropicClient, FakeModel, OllamaClient
+from .models import AnthropicClient, FakeModel, ModelRefused, OllamaClient
 from .sandbox import run_in_sandbox
 
 __version__ = "0.2.0"
@@ -23,7 +23,7 @@ __all__ = [
     "run_in_sandbox",
     "deny_all", "allow_all", "cli_approver", "policy_approver",
     "OutputValidator", "OutputRejected", "redact", "scan_injection", "wrap_tool_output",
-    "AnthropicClient", "FakeModel", "OllamaClient",
+    "AnthropicClient", "FakeModel", "ModelRefused", "OllamaClient",
     "RunResult",
     "EvalCase", "EvalReport", "run_evals",
     "__version__",
