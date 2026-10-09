@@ -82,7 +82,8 @@ Docker flags: no network, read-only root, CPU/memory/PID caps, all capabilities 
 - Limits tuned from real traces
 - Redis-backed `RateLimiter` and `SessionMemory` for multi-instance deployments
 - Kill switch tested
-**Mistake:** No step cap, so a confused agent loops and burns budget.
+- Model prices current: `AnthropicClient` bills from `models._PRICES` (cache reads and writes included) and prices an unknown model at the most expensive known rate
+**Mistake:** No step cap, so a confused agent loops and burns budget. Or a price table that under-counts a model, so the dollar cap lets through more spend than intended.
 
 ## P8 — Output validation
 
