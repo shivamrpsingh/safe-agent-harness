@@ -92,7 +92,8 @@ OFFLINE_SCRIPT = [
     ("lookup_order", {"order_id": "A1"}),                                   # fails -> cache
     ("fetch_policy_page", {"url": "https://shop.example/returns"}),         # injection flagged
     ("calculate", {"expression": "42.0 * 1"}),                              # sandbox
-    ("refund", {"order_id": "A1", "amount": 42.0, "reason": "arrived damaged"}),  # auto-approved
+    ("refund", {"order_id": "A1", "amount": 42.0, "reason": "arrived damaged",
+                "idempotency_key": "refund-A1-1"}),  # auto-approved
     "Refunded $42.00 for order A1. A confirmation goes to jane@example.com.",     # email redacted
 ]
 
